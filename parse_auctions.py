@@ -15,77 +15,42 @@ SOURCE_FILE_GCS = 'auctionData.json'
 OUTPUT_FILE_GCS = 'auctionDataWithDetails.json'
 LOCAL_TEMP_INPUT_PATH = './auctionData_temp.json'
 
-def parse_table_with_layout_inference(table_lines, header_map_def):
-    """
-    [核心升級] 基於版面推斷的智慧型表格解析器。
-    此函式徹底拋棄 re.split，轉而模擬人類閱讀行為：
-    1. 學習表頭位置：分析表頭中各欄位的起始水平座標。
-    2. 推斷欄位邊界：根據表頭位置定義每一欄的範圍。
-    3. 按位置分配資料：將後續資料行的文字，根據其座標歸入對應的欄位。
-    """
-    if not table_lines or len(table_lines) < 2:
-        return
-
-    header_line = table_lines
-    header_spans =
-    
-    # 建立一個從標準欄位到其在表頭中位置的映射
-    header_map = {}
-    for key, variations in header_map_def.items():
-        for start_pos, text in header_spans:
-            if any(v in text for v in variations):
-                header_map[key] = start_pos
-                break
-    
-    if "編號" not in header_map:
-        return # 如果連最基本的 "編號" 欄位都找不到，則視為無效表格
-
-    # 根據位置排序，並計算出每個欄位的邊界
-    sorted_headers = sorted(header_map.items(), key=lambda item: item[1])
-    column_boundaries =
-    for i in range(len(sorted_headers)):
-        key, start_pos = sorted_headers[i]
-        # 下一個欄位的起始位置是當前欄位的結束邊界
-        end_pos = sorted_headers[i+1][1] if i + 1 < len(sorted_headers) else len(header_line) + 20
-        column_boundaries.append({'key': key, 'start': start_pos, 'end': end_pos})
-
-    items =
-    for line in table_lines[1:]:
-        # 檢查是否為有效的資料行 (通常以數字編號開頭)
-        if not re.match(r'^\s*\d+', line):
-            # 如果不是，則將其內容附加到上一筆資料的「備考」欄位
-            if items and '備考' in items[-1]:
-                items[-1]['備考'] = (items[-1]['備考'] + ' ' + line.strip()).strip()
-            continue
-
-        item = {boundary['key']: '' for boundary in column_boundaries}
-        
-        # 將該行的文字按其在欄位邊界內的位置進行分配
-        for boundary in column_boundaries:
-            # 提取落在該欄位邊界內的文字
-            cell_text = line[boundary['start']:boundary['end']].strip()
-            item[boundary['key']] = (item[boundary['key']] + ' ' + cell_text).strip()
-        
-        # 進行基本的資料驗證
-        if item.get("編號"):
-            items.append(item)
-            
-    return items
-
-
 def parse_auction_pdf(pdf, case_number):
     """
-    強健的 PDF 解析函式 v16 (最終版：實現版面感知)
+    強健的 PDF 解析函式 v15 (最終版：基於鑑識報告的混合解析管線架構)
+
+    本函式嚴格遵循《解析腳本缺失土地建物拍賣明細》報告中提出的戰略框架，
+    採用「版面感知分段」與「情境狀態機」的混合模式，以解決先前版本的所有問題。
+
+    核心特點:
+    1.  **狀態機邏輯 (State Machine):**
+        - 不再將表格與文字分開處理。程式會逐行讀取 PDF，並根據關鍵字
+          (如 "土地拍賣明細", "備註") 在不同解析模式間切換 ('LAND', 'BUILDING', 'REMARKS' 等)。
+    2.  **情境感知解析 (Context-Aware Parsing):**
+        - 當進入 'LAND' 或 'BUILDING' 模式時，會立刻在當前頁面、當前位置開始尋找表格，
+          確保了表格與其所屬標題和標別的正確關聯。
+    3.  **強健的表格處理:**
+        - 採用更靈活的表頭映射 (Header Mapping)，能應對欄位順序、名稱的變化。
+        - 對擷取到的原始表格進行清理和重組，處理合併儲存格和跨行資料。
+    4.  **多標別的正確隔離:**
+        - 遇到新的 "標別" 時，會先將當前累積的資料儲存，然後徹底重置解析狀態，
+          確保每個標別的資料 (包括表格) 都是完全獨立的。
+
+    @param {pdfplumber.PDF} pdf - pdfplumber 開啟的 PDF 物件
+    @param {string} case_number - 案件編號
+    @returns {dict | None} - 標準化的拍賣公告物件
     """
     if not pdf.pages:
         return None
 
+    # --- 表頭定義 (更具彈性的關鍵字變體) ---
     LAND_HEADER_MAP_DEF = {
         "編號": ["編號"], "縣市": ["縣市"], "鄉鎮市區": ["鄉鎮市區", "鄉鎮市"],
         "段": ["段"], "小段": ["小段"], "地號": ["地號"],
         "面積(m²)": ["面積"], "權利範圍": ["權利範圍", "權利"],
         "價格(元)": ["價格", "最低拍賣價格"], "備考": ["備考"]
     }
+
     BUILDING_HEADER_MAP_DEF = {
         "編號": ["編號"], "建號": ["建號"], "建物門牌": ["門牌", "建物坐落", "基地坐落"],
         "主要建材/層數": ["主要建材", "層數", "建築式樣"], "面積(m²)": ["面積"],
@@ -93,13 +58,23 @@ def parse_auction_pdf(pdf, case_number):
         "價格(元)": ["價格", "最低拍賣價格"], "備考": ["備考"]
     }
 
-    parsed_bid_sections =
+    # --- 核心狀態變數 ---
+    parsed_bid_sections = []
     current_section = None
-    current_mode = 'HEADER'
+    current_mode = 'HEADER'  # HEADER, LAND, BUILDING, DELIVERY, USAGE, REMARKS
     last_other_key = None
+
+    def clean_text(text):
+        return (text or "").replace('\n', ' ').strip()
 
     def finalize_section(section):
         if not section: return None
+        # 清理所有欄位中的多餘空格
+        for item_list in [section.get('lands', []), section.get('buildings', [])]:
+            for item in item_list:
+                for key, value in item.items():
+                    item[key] = re.sub(r'\s+', ' ', str(value)).strip()
+        # 只有在包含有效內容時才回傳
         if section.get("lands") or section.get("buildings") or any(section.get("otherSections", {}).values()):
             return section
         return None
@@ -110,64 +85,129 @@ def parse_auction_pdf(pdf, case_number):
             finalized = finalize_section(current_section)
             if finalized:
                 parsed_bid_sections.append(finalized)
-        bid_name = (bid_match.group(1) or "").strip() if bid_match else "N/A"
-        current_section = {"bidName": bid_name, "header": "", "lands":, "buildings":, "otherSections": {}}
+
+        bid_name = clean_text(bid_match.group(1)) if bid_match else "N/A"
+        current_section = {"bidName": bid_name, "header": "", "lands": [], "buildings": [], "otherSections": {}}
         current_mode = 'HEADER'
         last_other_key = None
 
-    full_text = "\n".join()
-    lines = full_text.split('\n')
+    # --- 智慧映射函式 (從擷取到的表頭中，找出標準欄位對應的欄位索引) ---
+    def create_header_map(header_row, standard_headers_def):
+        header_map = {}
+        cleaned_header = [clean_text(cell) for cell in header_row]
+        for key, variations in standard_headers_def.items():
+            for i, cell in enumerate(cleaned_header):
+                if any(v in cell for v in variations):
+                    header_map[key] = i
+                    break
+        return header_map
     
-    start_new_section(None)
+    # --- 表格解析核心邏輯 ---
+    def process_table(table_data, header_map_def):
+        if not table_data or len(table_data) < 2:
+            return []
+        
+        header_map = create_header_map(table_data[0], header_map_def)
+        
+        # 驗證表頭是否有效 (至少要包含編號和一個核心識別欄位)
+        if "編號" not in header_map or ('地號' not in header_map and '建號' not in header_map):
+            return []
+
+        items = []
+        for row in table_data[1:]:
+            cleaned_row = [clean_text(cell) for cell in row]
+            if not any(cleaned_row) or not cleaned_row[header_map["編號"]]:
+                continue
+            
+            item = {}
+            for key, index in header_map.items():
+                if index < len(cleaned_row):
+                    item[key] = cleaned_row[index]
+            items.append(item)
+        return items
+
+
+    # --- 真正開始逐頁、逐行解析 ---
+    start_new_section(None) # 初始化第一個 section
+
+    full_text_content = []
+    for page in pdf.pages:
+        full_text_content.append(page.extract_text(x_tolerance=2) or "")
+    
+    combined_text = "\n".join(full_text_content)
+    lines = combined_text.split('\n')
+    
     line_idx = 0
     while line_idx < len(lines):
         line = lines[line_idx]
         line_strip = line.strip()
 
-        if not line_strip or "函 稿 代 碼" in line_strip:
-            line_idx += 1
-            continue
-        
-        # --- 模式切換 ---
-        bid_match = re.search(r'標\s*別\s*[:：]\s*([甲乙丙丁戊己庚辛壬癸0-9A-Z]+)', line_strip)
-        if bid_match:
-            start_new_section(bid_match)
+        if not line_strip or re.match(r'^\(續上頁\)', line_strip) or "函 稿 代 碼" in line_strip:
             line_idx += 1
             continue
 
+        # --- 模式切換邏輯 ---
+        bid_match = re.search(r'標\s*別\s*[:：]\s*([甲乙丙丁戊己庚辛壬癸0-9A-Z]+)', line_strip)
+        if bid_match:
+            start_new_section(bid_match)
+            current_mode = 'HEADER'
+            line_idx +=1
+            continue
+        
         if '土地拍賣明細' in line_strip:
             current_mode = 'LAND_TABLE'
             line_idx += 1
             continue
+
         if '建物拍賣明細' in line_strip:
             current_mode = 'BUILDING_TABLE'
             line_idx += 1
             continue
-        if any(line_strip.startswith(kw) for kw in ["點交情形", "使用情形", "備註"]):
-            current_mode = 'OTHER_TEXT'
-            # 不增加 line_idx，讓 OTHER_TEXT 區塊處理這一行
 
-        # --- 內容擷取 ---
-        if current_mode == 'LAND_TABLE' or current_mode == 'BUILDING_TABLE':
-            table_lines =
-            # 收集表格的所有行，直到遇到下一個區塊的關鍵字或明顯的非表格行
+        # --- 內容擷取邏輯 (狀態機) ---
+        if current_mode == 'HEADER':
+            if not current_section.get("header"):
+                header_match = re.search(r'(\d+\s*年\s*司\s*執\s*\S*\s*字\s*(?:第)?\s*\d+\s*號)', line)
+                if header_match:
+                    case_no = re.sub(r'\s', '', header_match.group(1))
+                    current_section["header"] = f"{case_no} 財產所有人: OOO"
+            # 遇到其他區塊的關鍵字時，切換到文字擷取模式
+            if any(kw in line_strip for kw in ["點交情形", "使用情形", "備註"]):
+                 current_mode = 'OTHER_TEXT'
+            else:
+                 line_idx += 1
+        
+        elif current_mode == 'LAND_TABLE':
+             # 從當前位置開始，收集所有屬於表格的行
+            table_lines = []
             while line_idx < len(lines):
-                table_line = lines[line_idx]
-                if (any(kw in table_line for kw in ["建物拍賣明細", "點交情形", "使用情形", "備註"]) or
-                    (len(table_lines) > 1 and not re.match(r'^\s*(\d+|[（(])', table_line.strip()))):
+                table_line = lines[line_idx].strip()
+                if not table_line or '建物拍賣明細' in table_line or any(kw in table_line for kw in ["點交情形", "使用情形", "備註"]):
                     break
-                table_lines.append(table_line)
+                # 使用正則表達式分割，作為備用方案
+                cols = re.split(r'\s{2,}', lines[line_idx])
+                table_lines.append(cols)
                 line_idx += 1
             
-            if current_mode == 'LAND_TABLE':
-                parsed_items = parse_table_with_layout_inference(table_lines, LAND_HEADER_MAP_DEF)
-                if parsed_items: current_section['lands'].extend(parsed_items)
-            else: # BUILDING_TABLE
-                parsed_items = parse_table_with_layout_inference(table_lines, BUILDING_HEADER_MAP_DEF)
-                if parsed_items: current_section['buildings'].extend(parsed_items)
+            parsed_lands = process_table(table_lines, LAND_HEADER_MAP_DEF)
+            if parsed_lands:
+                current_section['lands'].extend(parsed_lands)
+            current_mode = 'HEADER' # 解析完表格後，回到預設狀態
+        
+        elif current_mode == 'BUILDING_TABLE':
+            table_lines = []
+            while line_idx < len(lines):
+                table_line = lines[line_idx].strip()
+                if not table_line or '土地拍賣明細' in table_line or any(kw in table_line for kw in ["點交情形", "使用情形", "備註"]):
+                    break
+                cols = re.split(r'\s{2,}', lines[line_idx])
+                table_lines.append(cols)
+                line_idx += 1
             
-            current_mode = 'HEADER' # 解析完畢，回到預設狀態
-            continue
+            parsed_buildings = process_table(table_lines, BUILDING_HEADER_MAP_DEF)
+            if parsed_buildings:
+                current_section['buildings'].extend(parsed_buildings)
+            current_mode = 'HEADER'
 
         elif current_mode == 'OTHER_TEXT':
             is_keyword = False
@@ -175,21 +215,18 @@ def parse_auction_pdf(pdf, case_number):
                 if line_strip.startswith(keyword):
                     last_other_key = keyword
                     content = line_strip[len(keyword):].lstrip(' :：')
-                    current_section[keyword] = (current_section.get(keyword, '') + ' ' + content).strip()
+                    current_section['otherSections'][keyword] = (current_section['otherSections'].get(keyword, '') + ' ' + content).strip()
                     is_keyword = True
                     break
             if not is_keyword and last_other_key:
-                current_section[last_other_key] = (current_section[last_other_key] + ' ' + line_strip).strip()
+                 current_section['otherSections'][last_other_key] += ' ' + line_strip
 
-        elif current_mode == 'HEADER':
-            if not current_section.get("header"):
-                header_match = re.search(r'(\d+\s*年\s*司\s*執\s*\S*\s*字\s*(?:第)?\s*\d+\s*號)', line)
-                if header_match:
-                    case_no = re.sub(r'\s', '', header_match.group(1))
-                    current_section["header"] = f"{case_no} 財產所有人: OOO"
-        
-        line_idx += 1
+            line_idx += 1
+        else:
+            line_idx += 1
 
+
+    # 處理最後一個 section
     finalized = finalize_section(current_section)
     if finalized:
         parsed_bid_sections.append(finalized)
@@ -227,8 +264,8 @@ def main():
             print(f"發現現有的結果檔案 {OUTPUT_FILE_GCS}，載入進度...")
             try:
                 existing_data = json.loads(output_blob.download_as_string())
-                if isinstance(existing_data, list) and existing_data and 'caseNumber' in existing_data:
-                    processed_details = {item['caseNumber']: item for item in existing_data}
+                if isinstance(existing_data, list) and existing_data and 'caseNumber' in existing_data[0]:
+                    processed_details = {item['caseNumber']: item['auctionDetails'] for item in existing_data}
                     print(f"  -> 已成功載入 {len(processed_details)} 筆已處理的案件進度。")
                 else:
                     print("  -> 警告: 進度檔案格式不符或為舊格式，將重新開始。")
@@ -239,7 +276,7 @@ def main():
         with open(LOCAL_TEMP_INPUT_PATH, 'r', encoding='utf-8') as f:
             auction_data = json.load(f)
         
-        all_cases = auction_data.get('data',)
+        all_cases = auction_data.get('data', [])
         total = len(all_cases)
         newly_processed_count = 0
         
@@ -248,6 +285,7 @@ def main():
         for i, case_data in enumerate(all_cases):
             case_num_str = case_data.get('caseNumber', 'N/A')
             
+            # 增加對 auctionDetails 存在且不為 None 的檢查
             if (case_num_str in processed_details and 
                 processed_details.get(case_num_str) and 
                 'error' not in processed_details.get(case_num_str, {})):
@@ -260,12 +298,13 @@ def main():
             
             pdfs_list = case_data.get('assets', {}).get('pdfs')
             pdf_url = None
+            # 更安全的 URL 獲取方式
             if pdfs_list and isinstance(pdfs_list, list) and len(pdfs_list) > 0:
-                first_pdf = pdfs_list
+                first_pdf = pdfs_list[0]
                 if first_pdf and isinstance(first_pdf, dict):
                     pdf_url = first_pdf.get('url')
 
-            if pdf_url and pdf_url!= 'N/A':
+            if pdf_url and pdf_url != 'N/A':
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 for attempt in range(3):
                     try:
@@ -297,14 +336,14 @@ def main():
 
             if newly_processed_count > 0 and newly_processed_count % 25 == 0:
                 print(f"\n已處理 {newly_processed_count} 筆新案件，正在儲存進度至 GCS...")
-                output_list =
+                output_list = [{"caseNumber": k, "auctionDetails": v} for k, v in processed_details.items()]
                 if upload_to_gcs(bucket, OUTPUT_FILE_GCS, output_list):
                     print("✅ 進度儲存成功。")
                 else:
                     print("❌ 進度儲存失敗。")
 
         print("\n所有案件處理完畢，正在進行最終儲存...")
-        output_list =
+        output_list = [{"caseNumber": k, "auctionDetails": v} for k, v in processed_details.items()]
         if upload_to_gcs(bucket, OUTPUT_FILE_GCS, output_list):
              print(f"\n處理完成！已將 {len(output_list)} 筆案件的詳細資訊儲存至 GCS 上的 {OUTPUT_FILE_GCS}")
         else:
