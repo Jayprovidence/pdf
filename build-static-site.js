@@ -8,7 +8,6 @@ const GCS_BUCKET_NAME = 'foreclosure-data-bucket-lin-2025';
 const SOURCE_FILE_GCS = 'auctionDataWithDetails.json';
 
 // --- 本地路徑設定 ---
-// *** 已修正：移除 '..'，讓腳本在目前目錄下尋找 case-template.ejs ***
 const TEMPLATE_PATH = path.join(__dirname, 'case-template.ejs');
 const DIST_PATH = path.join(__dirname, 'dist');
 
@@ -57,3 +56,4 @@ async function main() {
 }
 
 main();
+
