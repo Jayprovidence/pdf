@@ -21,13 +21,12 @@
         .info-item svg { flex-shrink: 0; width: 1.5rem; height: 1.5rem; margin-right: 0.75rem; color: var(--brand-accent); }
         details > summary { cursor: pointer; font-weight: 600; }
         .auction-table { width: 100%; margin-top: 1rem; border-collapse: collapse; font-size: 0.875rem; line-height: 1.5; table-layout: fixed; }
-        .auction-table th, .auction-table td { border: 1px solid #E5E7EB; padding: 0.75rem; text-align: left; vertical-align: top; word-wrap: break-word; }
-        .auction-table thead { background-color: #F9FAFB; }
-        .auction-table th { font-weight: 600; color: #374151; }
-        .auction-table tbody tr:nth-child(odd) { background-color: white; }
-        .auction-table tbody tr:nth-child(even) { background-color: #F9FAFB; }
-        .section-title { font-size: 1.125rem; font-weight: 700; color: var(--text-primary); margin-top: 1.5rem; margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--brand-accent); }
+        .auction-table td { border: 1px solid #E5E7EB; padding: 0.75rem; text-align: left; vertical-align: top; word-wrap: break-word; }
         .other-info-table td:first-child { width: 120px; font-weight: 600; background-color: #F9FAFB; }
+        .formatted-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
     </style>
 </head>
 <body class="p-4 md:p-8">
@@ -106,72 +105,20 @@
                                             標別：<%= section.bidName %> - <%= section.header %>
                                         </h3>
 
-                                        <% if (section.lands && section.lands.length > 0) { %>
-                                            <h4 class="section-title">土地拍賣明細</h4>
-                                            <div class="overflow-x-auto">
-                                                <table class="auction-table">
-                                                    <thead>
-                                                        <tr>
-                                                            <th>編號</th> <th>縣市</th> <th>鄉鎮市區</th> <th>段</th><th>小段</th> <th>地號</th> <th>面積(m²)</th> <th>權利範圍</th> <th>價格(元)</th> <th>備考</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        <% section.lands.forEach(land => { %>
-                                                            <tr>
-                                                                <td><%- land['編號'] %></td> <td><%- land['縣市'] %></td> <td><%- land['鄉鎮市區'] %></td> <td><%- land['段'] %></td><td><%- land['小段'] %></td> <td><%- land['地號'] %></td> <td><%- land['面積(m²)'] %></td> <td><%- land['權利範圍'] %></td> <td><%- land['價格(元)'] %></td> <td><%- land['備考'] %></td>
-                                                            </tr>
-                                                        <% }); %>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        <% } %>
-
-                                        <% if (section.buildings && section.buildings.length > 0) { %>
-                                            <h4 class="section-title">建物拍賣明細</h4>
-                                            <div class="overflow-x-auto">
-                                                <table class="auction-table">
-                                                    <thead>
-                                                        <tr>
-                                                            <th>編號</th>
-                                                            <th>建號</th>
-                                                            <th>建物門牌及備考</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        <% section.buildings.forEach(b => { %>
-                                                            <tr>
-                                                                <td><%- b['編號'] || '' %></td>
-                                                                <td><%- b['建號'] || '' %></td>
-                                                                <td><%- b['建物門牌'] || (b['建物門牌及備考'] || '') %></td>
-                                                            </tr>
-                                                        <% }); %>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        <% } %>
-                                        
-                                        <%# *** 這部分是主要修改 *** %>
-                                        <% if (section['點交情形'] || section['使用情形'] || section['備註']) { %>
-                                            <h4 class="section-title">其他資訊</h4>
-                                            <div class="overflow-x-auto">
+                                        <% if (section['使用情形'] || section['備註']) { %>
+                                            <div class="overflow-x-auto mt-4">
                                                 <table class="auction-table other-info-table">
                                                     <tbody>
-                                                        <% if (section['點交情形']) { %>
-                                                        <tr>
-                                                            <td>點交情形</td>
-                                                            <td><%- section['點交情形'] %></td>
-                                                        </tr>
-                                                        <% } %>
                                                         <% if (section['使用情形']) { %>
                                                         <tr>
                                                             <td>使用情形</td>
-                                                            <td><%- section['使用情形'] %></td>
+                                                            <td class="formatted-text"><%- section['使用情形'] %></td>
                                                         </tr>
                                                         <% } %>
                                                         <% if (section['備註']) { %>
                                                         <tr>
                                                             <td>備註</td>
-                                                            <td><%- section['備註'] %></td>
+                                                            <td class="formatted-text"><%- section['備註'] %></td>
                                                         </tr>
                                                         <% } %>
                                                     </tbody>
@@ -234,3 +181,4 @@
     </div>
 </body>
 </html>
+
