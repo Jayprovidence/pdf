@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><%= court %> <%= caseNumber %> 法拍資訊 - 樹懶法拍</title>
-    <meta name="description" content="查詢 <%= court %> <%= caseNumber %> 法拍案件的詳細資訊，包含拍賣日期：<%= auctionDate %>，標的物：<% if (locals.items && items.length > 0) { %><%= items.map(p => p.address).join(', ') %><% } else { %>詳情請見內容<% } %>。">
+    <title><%= caseData.court %> <%= caseData.caseNumber %> 法拍資訊 - 樹懶法拍</title>
+    <meta name="description" content="查詢 <%= caseData.court %> <%= caseData.caseNumber %> 法拍案件的詳細資訊，包含拍賣日期：<%= caseData.auctionDate %>，標的物：<% if (caseData.items && caseData.items.length > 0) { %><%= caseData.items.map(p => p.address).join(', ') %><% } else { %>詳情請見內容<% } %>。">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -20,48 +20,14 @@
         .info-item { display: flex; align-items: flex-start; }
         .info-item svg { flex-shrink: 0; width: 1.5rem; height: 1.5rem; margin-right: 0.75rem; color: var(--brand-accent); }
         details > summary { cursor: pointer; font-weight: 600; }
-        .auction-table {
-            width: 100%;
-            margin-top: 1rem;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-            line-height: 1.5;
-            table-layout: fixed;
-        }
-        .auction-table th, .auction-table td {
-            border: 1px solid #E5E7EB;
-            padding: 0.75rem;
-            text-align: left;
-            vertical-align: top;
-            word-wrap: break-word;
-        }
-        .auction-table thead {
-            background-color: #F9FAFB;
-        }
-        .auction-table th {
-            font-weight: 600;
-            color: #374151;
-        }
-        .auction-table tbody tr:nth-child(odd) {
-            background-color: white;
-        }
-        .auction-table tbody tr:nth-child(even) {
-            background-color: #F9FAFB;
-        }
-        .section-title {
-            font-size: 1.125rem;
-            font-weight: 700;
-            color: var(--text-primary);
-            margin-top: 1.5rem;
-            margin-bottom: 0.5rem;
-            padding-bottom: 0.5rem;
-            border-bottom: 2px solid var(--brand-accent);
-        }
-        .other-info-table td:first-child {
-            width: 120px;
-            font-weight: 600;
-            background-color: #F9FAFB;
-        }
+        .auction-table { width: 100%; margin-top: 1rem; border-collapse: collapse; font-size: 0.875rem; line-height: 1.5; table-layout: fixed; }
+        .auction-table th, .auction-table td { border: 1px solid #E5E7EB; padding: 0.75rem; text-align: left; vertical-align: top; word-wrap: break-word; }
+        .auction-table thead { background-color: #F9FAFB; }
+        .auction-table th { font-weight: 600; color: #374151; }
+        .auction-table tbody tr:nth-child(odd) { background-color: white; }
+        .auction-table tbody tr:nth-child(even) { background-color: #F9FAFB; }
+        .section-title { font-size: 1.125rem; font-weight: 700; color: var(--text-primary); margin-top: 1.5rem; margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--brand-accent); }
+        .other-info-table td:first-child { width: 120px; font-weight: 600; background-color: #F9FAFB; }
     </style>
 </head>
 <body class="p-4 md:p-8">
@@ -69,16 +35,16 @@
         <nav class="text-sm text-gray-500 mb-4">
             <a href="/real-estate" class="hover:underline">首頁</a> /
             <a href="/real-estate" class="hover:underline">不動產</a> /
-            <span class="font-medium text-gray-700"><%= caseNumber %></span>
+            <span class="font-medium text-gray-700"><%= caseData.caseNumber %></span>
         </nav>
 
         <div class="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
             <div>
-                <h1 class="text-3xl font-bold text-gray-800"><%= court %></h1>
-                <p class="text-lg text-gray-500"><%= division %> <%= caseNumber %></p>
+                <h1 class="text-3xl font-bold text-gray-800"><%= caseData.court %></h1>
+                <p class="text-lg text-gray-500"><%= caseData.division %> <%= caseData.caseNumber %></p>
                 <div class="mt-2">
                     <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
-                        <%= locals.status ? status : '未知' %>
+                        <%= caseData.status ? caseData.status : '未知' %>
                     </span>
                 </div>
             </div>
@@ -91,19 +57,19 @@
                     <div class="info-grid">
                         <div class="info-item">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0h18M12 12.75h.008v.008H12v-.008Z" /></svg>
-                            <div><p class="font-semibold">拍賣日期</p><p><%= auctionDate %></p></div>
+                            <div><p class="font-semibold">拍賣日期</p><p><%= caseData.auctionDate %></p></div>
                         </div>
                         <div class="info-item">
                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" /></svg>
-                            <div><p class="font-semibold">拍賣次數</p><p>第 <%= auctionCount %> 拍</p></div>
+                            <div><p class="font-semibold">拍賣次數</p><p>第 <%= caseData.auctionCount %> 拍</p></div>
                         </div>
                         <div class="info-item">
-                           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.826-1.106-2.257 0-3.083C10.536 7.219 11.275 7 12 7c.725 0 1.45.22 2.003.659" /></svg>
-                            <div><p class="font-semibold">總拍賣底價</p><p><%= new Intl.NumberFormat('zh-TW').format(price) %> 元</p></div>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.826-1.106-2.257 0-3.083C10.536 7.219 11.275 7 12 7c.725 0 1.45.22 2.003.659" /></svg>
+                            <div><p class="font-semibold">總拍賣底價</p><p><%= new Intl.NumberFormat('zh-TW').format(caseData.price) %> 元</p></div>
                         </div>
                         <div class="info-item">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21 8.25Z" /></svg>
-                            <div><p class="font-semibold">點交狀態</p><p><%= handover ? '點交' : '不點交' %></p></div>
+                            <div><p class="font-semibold">點交狀態</p><p><%= caseData.handover ? '點交' : '不點交' %></p></div>
                         </div>
                     </div>
                 </div>
@@ -111,8 +77,8 @@
                 <div class="card p-6">
                     <h2 class="text-xl font-bold mb-4">拍賣標的物</h2>
                     <ul class="space-y-4">
-                        <% if (locals.items && items.length > 0) { %>
-                            <% items.forEach(item => { %>
+                        <% if (caseData.items && caseData.items.length > 0) { %>
+                            <% caseData.items.forEach(item => { %>
                                 <li class="p-4 border border-gray-200 rounded-md">
                                     <span class="inline-block bg-gray-100 text-gray-800 text-xs font-medium px-2 py-1 rounded-md mb-2"><%= item.type %></span>
                                     <p class="text-gray-800"><%= item.address %></p>
@@ -127,17 +93,17 @@
                     </ul>
                 </div>
                 
-                <% if (locals.auctionDetails && auctionDetails.bidSections && auctionDetails.bidSections.length > 0) { %>
+                <% if (caseData.auctionDetails && caseData.auctionDetails.bidSections && caseData.auctionDetails.bidSections.length > 0) { %>
                     <div class="card p-6">
                         <details open>
                             <summary class="text-xl font-bold">拍賣公告</summary>
                             <div class="mt-4 pt-4 border-t">
                                 <p class="text-sm text-gray-500 mb-4">（此處內文由AI自動擷取，詳情請參閱法院公告之附件）</p>
                                 
-                                <% auctionDetails.bidSections.forEach((section, index) => { %>
+                                <% caseData.auctionDetails.bidSections.forEach((section, index) => { %>
                                     <div class="mb-8 p-4 border rounded-lg bg-gray-50">
                                         <h3 class="text-lg font-bold bg-gray-200 p-3 rounded-t-md text-gray-800">
-                                             <%= section.header %>
+                                            標別：<%= section.bidName %> - <%= section.header %>
                                         </h3>
 
                                         <% if (section.lands && section.lands.length > 0) { %>
@@ -176,7 +142,7 @@
                                                             <tr>
                                                                 <td><%- b['編號'] || '' %></td>
                                                                 <td><%- b['建號'] || '' %></td>
-                                                                <td><%- b['建物門牌及備考'] || '' %></td>
+                                                                <td><%- b['建物門牌'] || (b['建物門牌及備考'] || '') %></td>
                                                             </tr>
                                                         <% }); %>
                                                     </tbody>
@@ -184,17 +150,30 @@
                                             </div>
                                         <% } %>
                                         
-                                        <% if (section.otherSections && Object.keys(section.otherSections).length > 0) { %>
+                                        <%# *** 這部分是主要修改 *** %>
+                                        <% if (section['點交情形'] || section['使用情形'] || section['備註']) { %>
                                             <h4 class="section-title">其他資訊</h4>
                                             <div class="overflow-x-auto">
                                                 <table class="auction-table other-info-table">
                                                     <tbody>
-                                                        <% Object.entries(section.otherSections).forEach(([key, value]) => { %>
-                                                            <tr>
-                                                                <td><%= key %></td>
-                                                                <td><%- value %></td>
-                                                            </tr>
-                                                        <% }); %>
+                                                        <% if (section['點交情形']) { %>
+                                                        <tr>
+                                                            <td>點交情形</td>
+                                                            <td><%- section['點交情形'] %></td>
+                                                        </tr>
+                                                        <% } %>
+                                                        <% if (section['使用情形']) { %>
+                                                        <tr>
+                                                            <td>使用情形</td>
+                                                            <td><%- section['使用情形'] %></td>
+                                                        </tr>
+                                                        <% } %>
+                                                        <% if (section['備註']) { %>
+                                                        <tr>
+                                                            <td>備註</td>
+                                                            <td><%- section['備註'] %></td>
+                                                        </tr>
+                                                        <% } %>
                                                     </tbody>
                                                 </table>
                                             </div>
@@ -204,12 +183,12 @@
                             </div>
                         </details>
                     </div>
-                 <% } else if (locals.auctionDetails && locals.auctionDetails.error) { %>
+                <% } else if (caseData.auctionDetails && caseData.auctionDetails.error) { %>
                     <div class="card p-6">
                         <details open>
                             <summary class="text-xl font-bold">拍賣公告</summary>
                             <div class="mt-4 pt-4 border-t">
-                                <p class="text-red-500 font-semibold"><%= auctionDetails.error %></p>
+                                <p class="text-red-500 font-semibold"><%= caseData.auctionDetails.error %></p>
                             </div>
                         </details>
                     </div>
@@ -218,14 +197,14 @@
             
             <div class="lg:col-span-1 space-y-8">
                 <div class="p-4 rounded-md bg-yellow-50 border border-yellow-200">
-                     <p class="text-sm text-yellow-800">所有資訊僅供參考，實際內容請以執行法院公告為準。</p>
+                    <p class="text-sm text-yellow-800">所有資訊僅供參考，實際內容請以執行法院公告為準。</p>
                 </div>
 
                 <div class="card p-6">
                     <h3 class="text-lg font-bold mb-4">相關文件</h3>
                     <ul class="space-y-2">
-                        <% if (locals.assets && assets.pdfs && assets.pdfs.length > 0) { %>
-                            <% assets.pdfs.forEach(pdf => { %>
+                        <% if (caseData.assets && caseData.assets.pdfs && caseData.assets.pdfs.length > 0) { %>
+                            <% caseData.assets.pdfs.forEach(pdf => { %>
                                 <li>
                                     <a href="<%= pdf.url %>" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">
                                         法院拍賣公告(PDF)
@@ -238,12 +217,12 @@
                     </ul>
                 </div>
 
-                <% if (locals.assets && assets.detailPageUrl) { %>
+                <% if (caseData.assets && caseData.assets.detailPageUrl) { %>
                 <div class="card p-6">
                     <h3 class="text-lg font-bold mb-4">相關圖片</h3>
                     <ul class="space-y-2">
                         <li>
-                            <a href="<%= assets.detailPageUrl %>" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">
+                            <a href="<%= caseData.assets.detailPageUrl %>" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">
                                 法拍屋公告-看圖
                             </a>
                         </li>
@@ -255,4 +234,3 @@
     </div>
 </body>
 </html>
-
