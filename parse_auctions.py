@@ -1,14 +1,11 @@
 import json
 import requests
 import pdfplumber
-import camelot
-import pandas as pd
 import re
 import os
 import sys
 import time
 import random
-import io
 import tempfile
 import fitz  # PyMuPDF
 from google.cloud import storage
@@ -16,267 +13,280 @@ import traceback
 from typing import List, Dict, Any, Optional
 
 # --- GCS 設定 ---
-# 提醒：在生產環境中，建議將這些設定移至環境變數或專門的設定檔。
 GCS_BUCKET_NAME = 'foreclosure-data-bucket-lin-2025'
 SOURCE_FILE_GCS = 'auctionData.json'
 OUTPUT_FILE_GCS = 'auctionDataWithDetails.json'
 LOCAL_TEMP_INPUT_PATH = './auctionData_temp.json'
 
-# --- 階段一：預處理與分流 ---
 def is_scanned_pdf(pdf_path: str) -> bool:
-    """
-    使用 PyMuPDF 快速檢測 PDF 是否為掃描件（基於圖像）。
-    一個簡單的啟發式規則是檢查頁面上的文字數量。
-    """
+    """使用 PyMuPDF 快速檢測 PDF 是否為掃描件。"""
     try:
         doc = fitz.open(pdf_path)
-        if not doc.page_count:
+        if not doc.page_count: 
             return True
-        # 只檢查第一頁以提高效率
         page = doc.load_page(0)
         text = page.get_text("text")
-        # 如果頁面中可辨識的文字數量極少（例如少於100個字元），則有很高機率是掃描件
         return len(text.strip()) < 100
     except Exception as e:
         print(f"   -> 警告: 檢查 PDF 是否掃描檔時出錯: {e}", file=sys.stderr)
-        # 無法開啟或處理檔案，也視為需要特殊處理
         return True
 
-# --- 核心解析邏輯 ---
-def parse_auction_pdf_hybrid(pdf_path: str, case_number: str) -> Dict[str, Any]:
+def clean_and_format_text(text: str, section_type: str = None) -> str:
+    """清理文字，移除重複的標題並保留格式。
+    
+    Args:
+        text: 要清理的文字
+        section_type: 區段類型 ('使用情形' 或 '備註')
     """
-    高韌性 PDF 混合式解析管線 (v2.0)
+    if not text:
+        return ""
+    
+    # 移除標題關鍵字（如果出現在開頭）
+    if section_type:
+        # 移除該區段的標題，但保留可能出現在內容中的其他區段標題
+        pattern = f"^{re.escape(section_type)}\\s*"
+        cleaned_text = re.sub(pattern, "", text.strip())
+    else:
+        cleaned_text = text.strip()
+    
+    # 分割成行並清理
+    lines = cleaned_text.strip().split('\n')
+    non_empty_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # 跳過頁碼標記
+        if line and not re.match(r'^(第\s*\S+\s*頁|（續上頁）)$', line.strip()):
+            non_empty_lines.append(line)
+    
+    return "\n".join(non_empty_lines)
+
+def detect_and_remove_overlap(text: str, section_type: str = None) -> str:
+    """偵測並移除跨欄位的重複內容
+    
+    Args:
+        text: 要處理的文字
+        section_type: 區段類型 ('使用情形' 或 '備註')
+    
+    Returns:
+        處理後的文字
+    """
+    if not text:
+        return ""
+    
+    lines = text.strip().split('\n')
+    cleaned_lines = []
+    
+    # 檢查是否有其他區段的標題混入
+    other_section = '備註' if section_type == '使用情形' else '使用情形'
+    
+    for i, line in enumerate(lines):
+        # 如果在當前區段中發現其他區段的標題，且該標題出現在行首
+        if other_section and re.match(f'^{re.escape(other_section)}\\s', line):
+            # 這可能是重複內容的開始，檢查前一行
+            if i > 0 and cleaned_lines:
+                # 移除前一行（可能是重複的結尾）
+                # 但保留當前行之前的所有內容
+                break
+        # 檢查是否有「標別:」這類的標記出現在備註中
+        elif section_type == '備註' and re.match(r'^標別\s*[:：]\s*', line):
+            # 這是下一個標別的開始，應該停止
+            break
+        else:
+            cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
+def parse_auction_pdf_minimal(pdf_path: str, case_number: str) -> Dict[str, Any]:
+    """
+    優化版 PDF 文字解析管線，改進邊界處理以避免重複文字
     """
     if is_scanned_pdf(pdf_path):
         return {"error": "文件為掃描檔，無法自動解析。"}
 
-    LAND_HEADER_MAP_DEF = {
-        "編號": ["編號"], "縣市": ["縣市"], "鄉鎮市區": ["鄉鎮市區", "鄉鎮市"],
-        "段": ["段"], "小段": ["小段"], "地號": ["地號"],
-        "面積(m²)": ["面積"], "權利範圍": ["權利範圍", "權利"],
-        "價格(元)": ["最低拍賣價格", "價格"], "備考": ["備考"]
-    }
-    BUILDING_HEADER_MAP_DEF = {
-        "編號": ["編號"], "建號": ["建號"], "建物門牌": ["門牌", "建物坐落", "基地坐落"],
-        "主要建材/層數": ["主要建材", "層數", "建築式樣"], "面積(m²)": ["面積"],
-        "附屬建物": ["附屬建物", "附屬"], "權利範圍": ["權利範圍", "權利"],
-        "價格(元)": ["最低拍賣價格", "價格"], "備考": ["備考"]
-    }
-
-    def clean_text(text):
-        return str(text).replace('\n', ' ').strip() if text else ""
-
-    def create_header_map(header_row: List[str], standard_headers_def: Dict[str, List[str]]) -> Dict[str, int]:
-        header_map = {}
-        cleaned_header = [clean_text(cell) for cell in header_row]
-        for key, variations in standard_headers_def.items():
-            found = False
-            for i, cell in enumerate(cleaned_header):
-                if any(v in cell for v in variations):
-                    header_map[key] = i
-                    found = True
-                    break
-            if not found:
-                header_map[key] = -1
-        return header_map
-
-    def process_dataframe(df: pd.DataFrame, header_map_def: Dict[str, List[str]]) -> Optional[List[Dict[str, Any]]]:
-        if df.empty:
-            return None
-
-        header_row_index = -1
-        for i, row in df.iterrows():
-            if any("編號" in str(cell) for cell in row.values):
-                header_row_index = i
-                break
-        
-        if header_row_index == -1:
-            return None
-
-        header_row = df.iloc[header_row_index].values.tolist()
-        header_map = create_header_map(header_row, header_map_def)
-        
-        if header_map.get("編號", -1) == -1:
-            return None
-
-        items = []
-        data_rows_raw = df.iloc[header_row_index + 1:].values.tolist()
-        
-        if not data_rows_raw:
-            return None
-
-        # 強化的合併邏輯：處理多行儲存格
-        merged_rows = []
-        for row_values in data_rows_raw:
-            # 檢查編號欄位是否為空或不似編號
-            is_new_item = clean_text(row_values[header_map["編號"]]) and clean_text(row_values[header_map["編號"]]).isdigit()
-            
-            if is_new_item and any(clean_text(c) for c in row_values[1:]):
-                merged_rows.append([clean_text(cell) for cell in row_values])
-            elif merged_rows and any(clean_text(c) for c in row_values):
-                # 合併到上一筆資料
-                for i, val in enumerate(row_values):
-                    clean_val = clean_text(val)
-                    if clean_val:
-                        if i < len(merged_rows[-1]):
-                            merged_rows[-1][i] = f"{merged_rows[-1][i]} {clean_val}".strip()
-        
-        for row in merged_rows:
-            item = {}
-            for key, index in header_map.items():
-                if index != -1 and index < len(row):
-                    item[key] = re.sub(r'\s+', ' ', row[index]).strip()
-            
-            if len(item) > 1 and any(item.get(k) for k in item if k != '編號'):
-                items.append(item)
-        return items if items else None
-
-    def classify_and_process_tables(tables: List[Any], section_data: Dict[str, Any]):
-        if not tables: return
-        for table in tables:
-            df = table.df
-            if df.empty or df.shape[1] < 3: continue
-            
-            header_text = ' '.join([' '.join(map(str, row)) for _, row in df.head(3).iterrows()])
-            
-            is_land = any(k in header_text for k in ["地號", "地 號"])
-            is_building = any(k in header_text for k in ["建號", "建 號", "建物門牌", "建築式樣"])
-
-            if not is_land and not is_building:
-                continue
-
-            if is_land:
-                parsed_items = process_dataframe(df, LAND_HEADER_MAP_DEF)
-                if parsed_items: section_data['lands'].extend(parsed_items)
-            elif is_building:
-                parsed_items = process_dataframe(df, BUILDING_HEADER_MAP_DEF)
-                if parsed_items: section_data['buildings'].extend(parsed_items)
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            # --- 階段二：版面感知的語意分割 ---
             all_anchors = []
             full_text_for_header = ""
+            
+            # 第一遍掃描：收集所有錨點
             for i, page in enumerate(pdf.pages):
-                full_text_for_header += page.extract_text(x_tolerance=2) or ""
+                page_text = page.extract_text(x_tolerance=2) or ""
+                full_text_for_header += page_text
+                
+                # 搜尋關鍵字
                 search_keywords = {
                     'BID_SECTION': r'標\s*別\s*[:：]\s*([\'"]?[甲乙丙丁戊己庚辛壬癸0-9A-Z]+[\'"]?)',
-                    'DELIVERY': r'點交情形', 'USAGE': r'使用情形', 'REMARKS': r'備註'
+                    'USAGE': r'使用情形',
+                    'REMARKS': r'備註'
                 }
+                
                 for key, pattern in search_keywords.items():
-                    matches = page.search(pattern, regex=True, use_text_flow=True)
+                    matches = page.search(pattern, regex=True)
                     for match in matches:
+                        # 過濾掉不在左側的使用情形和備註標記
+                        if key in ['USAGE', 'REMARKS'] and match.get('x0', 0) > 100:
+                            continue
+                        
                         match_text = match.get('text', '')
+                        
+                        # 特殊處理標別提取
                         if key == 'BID_SECTION':
-                            bid_extract = re.search(pattern, match_text, re.IGNORECASE)
-                            if bid_extract and len(bid_extract.groups()) > 0:
+                            bid_extract = re.search(pattern, match_text)
+                            if bid_extract and len(bid_extract.groups()) > 0 and bid_extract.group(1):
                                 match_text = re.sub(r'^[\'"]|[\'"]$', '', bid_extract.group(1)).strip()
                         
-                        all_anchors.append({'type': key, 'page': i, 'top': match['top'], 'bottom': match['bottom'], 'text': match_text})
+                        all_anchors.append({
+                            'type': key,
+                            'page_index': i,
+                            'top': match['top'],
+                            'bottom': match['bottom'],
+                            'text': match_text,
+                            'x0': match.get('x0', 0)
+                        })
+
+            # 按頁面和位置排序錨點
+            all_anchors.sort(key=lambda x: (x['page_index'], x['top']))
             
-            all_anchors.sort(key=lambda x: (x['page'], x['top']))
-
-            bid_section_definitions = []
+            # 分離標別錨點
             bid_anchors = [a for a in all_anchors if a['type'] == 'BID_SECTION']
-            if bid_anchors:
-                for i, anchor in enumerate(bid_anchors):
-                    next_anchor = bid_anchors[i+1] if i + 1 < len(bid_anchors) else None
-                    bid_section_definitions.append({'start_anchor': anchor, 'next_bid_anchor': next_anchor})
-            else:
-                # 如果沒有標別，則將整個文件視為一個標別
-                bid_section_definitions.append({'start_anchor': {'text': 'N/A', 'page': 0, 'top': 0, 'bottom': 20}, 'next_bid_anchor': None})
+            
+            # 如果沒有找到標別，創建預設標別
+            if not bid_anchors:
+                bid_anchors.append({
+                    'text': 'N/A',
+                    'page_index': 0,
+                    'top': 0,
+                    'bottom': 20,
+                    'type': 'BID_SECTION'
+                })
 
+            # 解析每個標別區段
             parsed_bid_sections = []
-            for section_def in bid_section_definitions:
-                current_section_data = {"bidName": section_def['start_anchor']['text'], "header": "", "lands": [], "buildings": [], "otherSections": {}}
-                start_anchor = section_def['start_anchor']
-                next_bid_anchor = section_def['next_bid_anchor']
-
-                # --- 階段三：高保真度表格擷取 ---
-                start_page = start_anchor['page']
-                end_page = next_bid_anchor['page'] if next_bid_anchor else len(pdf.pages) - 1
+            
+            for i, bid_anchor in enumerate(bid_anchors):
+                current_section_data = {
+                    "bidName": bid_anchor['text'],
+                    "header": "",
+                    "使用情形": "",
+                    "備註": ""
+                }
                 
-                page_range_str = ",".join(map(str, range(start_page + 1, end_page + 2)))
-                if not page_range_str: continue
-
-                tables = None
-                try:
-                    # 策略一：優先使用 lattice (適用於有線表格)
-                    tables = camelot.read_pdf(pdf_path, pages=page_range_str, flavor='lattice', line_scale=40)
-                except Exception:
-                    tables = []
+                # 確定下一個標別的位置（如果存在）
+                next_bid_anchor = bid_anchors[i + 1] if i + 1 < len(bid_anchors) else None
                 
-                # 策略二：如果 lattice 找不到，使用 stream 作為後備 (適用於無線表格)
-                if not tables or all(t.df.empty for t in tables):
-                    try:
-                        table_areas = []
-                        for p_idx in range(start_page, end_page + 1):
-                            page = pdf.pages[p_idx]
-                            y_top = start_anchor['bottom'] if p_idx == start_page else 0
-                            y_bottom = next_bid_anchor['top'] if next_bid_anchor and p_idx == end_page else page.height
+                # 找出屬於當前標別的內容錨點
+                section_content_anchors = []
+                for anchor in all_anchors:
+                    if anchor['type'] in ['USAGE', 'REMARKS']:
+                        # 檢查是否在當前標別之後
+                        is_after_current = (
+                            anchor['page_index'] > bid_anchor['page_index'] or
+                            (anchor['page_index'] == bid_anchor['page_index'] and 
+                             anchor['top'] > bid_anchor['top'])
+                        )
+                        
+                        # 檢查是否在下一個標別之前
+                        is_before_next = True
+                        if next_bid_anchor:
+                            is_before_next = (
+                                anchor['page_index'] < next_bid_anchor['page_index'] or
+                                (anchor['page_index'] == next_bid_anchor['page_index'] and 
+                                 anchor['top'] < next_bid_anchor['top'])
+                            )
+                        
+                        if is_after_current and is_before_next:
+                            section_content_anchors.append(anchor)
+                
+                # 排序內容錨點
+                section_content_anchors.sort(key=lambda x: (x['page_index'], x['top']))
+                
+                # 解析每個內容區段
+                for j, content_anchor in enumerate(section_content_anchors):
+                    # 確定內容的起始位置
+                    start_page = content_anchor['page_index']
+                    start_y = content_anchor['bottom']  # 從錨點底部開始
+                    
+                    # 確定內容的結束位置
+                    if j + 1 < len(section_content_anchors):
+                        # 下一個內容錨點的頂部
+                        end_anchor = section_content_anchors[j + 1]
+                        end_page = end_anchor['page_index']
+                        end_y = end_anchor['top']
+                    elif next_bid_anchor:
+                        # 下一個標別的頂部
+                        end_page = next_bid_anchor['page_index']
+                        end_y = next_bid_anchor['top']
+                    else:
+                        # 文件結尾
+                        end_page = len(pdf.pages) - 1
+                        end_y = pdf.pages[end_page].height
+                    
+                    # 擷取文字
+                    full_text = ""
+                    for page_idx in range(start_page, end_page + 1):
+                        page = pdf.pages[page_idx]
+                        
+                        # 計算該頁的擷取邊界
+                        if page_idx == start_page:
+                            top = start_y
+                        else:
+                            top = 0
                             
-                            # 轉換為 camelot 座標系 (左下角為原點)
-                            y1 = page.height - y_bottom
-                            y2 = page.height - y_top
-                            if y2 > y1:
-                                table_areas.append(f"0,{y1},{page.width},{y2}")
-
-                        if table_areas:
-                            tables = camelot.read_pdf(pdf_path, pages=page_range_str, flavor='stream', table_areas=table_areas, row_tol=10)
-                    except Exception:
-                        tables = []
+                        if page_idx == end_page:
+                            bottom = end_y
+                        else:
+                            bottom = page.height
+                        
+                        # 確保邊界有效
+                        if top >= bottom:
+                            continue
+                            
+                        # 擷取指定區域的文字
+                        bbox = (0, top, page.width, bottom)
+                        cropped = page.crop(bbox)
+                        page_text = cropped.extract_text(x_tolerance=3, y_tolerance=3) or ""
+                        full_text += page_text
+                    
+                    # 確定區段類型
+                    key_map = {'USAGE': '使用情形', 'REMARKS': '備註'}
+                    section_key = key_map.get(content_anchor['type'])
+                    
+                    # 清理文字（傳入區段類型以進行更精確的清理）
+                    clean_content = clean_and_format_text(full_text, section_key)
+                    
+                    # 偵測並移除跨欄位的重複內容
+                    clean_content = detect_and_remove_overlap(clean_content, section_key)
+                    
+                    # 儲存內容
+                    if section_key and clean_content:
+                        current_section_data[section_key] = clean_content
                 
-                classify_and_process_tables(tables, current_section_data)
-
-                # --- 處理文字區塊 (點交情形、備註等) ---
-                text_anchors = [a for a in all_anchors if a['type'] != 'BID_SECTION' and start_page <= a['page'] <= end_page]
-                if next_bid_anchor:
-                    text_anchors = [a for a in text_anchors if a['page'] < next_bid_anchor['page'] or (a['page'] == next_bid_anchor['page'] and a['top'] < next_bid_anchor['top'])]
-
-                for i, anchor in enumerate(text_anchors):
-                    page_num = anchor['page']
-                    page_obj = pdf.pages[page_num]
-                    start_pos = anchor['bottom']
-                    end_pos = page_obj.height
-                    
-                    next_anchor_on_page = next((na for na in text_anchors[i+1:] if na['page'] == page_num), None)
-                    if next_anchor_on_page:
-                        end_pos = next_anchor_on_page['top']
-                    elif next_bid_anchor and next_bid_anchor['page'] == page_num:
-                        end_pos = next_bid_anchor['top']
-                    
-                    bbox = (0, start_pos, page_obj.width, end_pos)
-                    if bbox[1] >= bbox[3]: continue
-                    
-                    text = page_obj.crop(bbox).extract_text(x_tolerance=3, y_tolerance=3) or ""
-                    clean_content = re.sub(r'\s+', ' ', text).strip()
-                    
-                    key_map = {'DELIVERY': '點交情形', 'USAGE': '使用情形', 'REMARKS': '備註'}
-                    section_key = key_map.get(anchor['type'])
-                    if section_key:
-                        current_section_data[section_key] = (current_section_data.get(section_key, "") + " " + clean_content).strip()
-
-
-                # --- 階段四：資料結構化 ---
-                header_match = re.search(r'(\d+\s*年\s*司\s*執\s*\S*\s*字\s*(?:第)?\s*\d+\s*號)', full_text_for_header)
+                # 提取標題資訊
+                header_match = re.search(
+                    r'(\d+\s*年\s*司\s*執\s*\S*\s*字\s*(?:第)?\s*\d+\s*號)',
+                    full_text_for_header
+                )
                 if header_match:
                     case_no_clean = re.sub(r'\s', '', header_match.group(1))
                     current_section_data["header"] = f"{case_no_clean} 財產所有人: OOO"
-
-                if (current_section_data['lands'] or current_section_data['buildings'] or 
-                    any(current_section_data.get(k) for k in ['點交情形', '使用情形', '備註'])):
+                
+                # 只有在有實際內容時才加入結果
+                if current_section_data.get('使用情形') or current_section_data.get('備註'):
                     parsed_bid_sections.append(current_section_data)
 
-            return {"bidSections": parsed_bid_sections} if parsed_bid_sections else None
+            if parsed_bid_sections:
+                return {"bidSections": parsed_bid_sections}
+            else:
+                return {"error": "無法從文件中擷取指定資訊。"}
 
     except Exception as e:
         print(f"   -> 嚴重錯誤: 解析 PDF 過程中發生未預期錯誤 ({case_number}): {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return {"error": f"（PDF 解析時發生嚴重錯誤: {e}）"}
 
-
-def upload_to_gcs(bucket, blob_name, data):
-    """上傳資料至 Google Cloud Storage"""
+def upload_to_gcs(bucket, blob_name: str, data: Any) -> bool:
+    """上傳資料到 GCS"""
     try:
         blob = bucket.blob(blob_name)
         json_data_string = json.dumps(data, ensure_ascii=False, indent=4)
@@ -286,36 +296,53 @@ def upload_to_gcs(bucket, blob_name, data):
         print(f"❌ 錯誤: 上傳至 GCS 失敗: {e}", file=sys.stderr)
         return False
 
+def download_from_gcs(bucket, blob_name: str, local_path: str) -> bool:
+    """從 GCS 下載檔案"""
+    try:
+        print(f"正在從 GCS Bucket ({bucket.name}) 下載檔案: {blob_name}...")
+        source_blob = bucket.blob(blob_name)
+        
+        # 使用 download_as_bytes() 並寫入本地檔案
+        json_content_bytes = source_blob.download_as_bytes()
+        with open(local_path, 'wb') as f:
+            f.write(json_content_bytes)
+            
+        print(f"✅ 成功下載檔案至 {local_path}")
+        return True
+    except Exception as e:
+        print(f"❌ 錯誤: 從 GCS 下載 {blob_name} 失敗: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return False
+
 def main():
-    """主執行函式：協調 GCS 下載、PDF 解析、進度保存和最終上傳。"""
+    """主程式"""
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     
-    try:
-        print(f"正在從 GCS Bucket ({GCS_BUCKET_NAME}) 下載來源檔案: {SOURCE_FILE_GCS}...")
-        source_blob = bucket.blob(SOURCE_FILE_GCS)
-        source_blob.download_to_filename(LOCAL_TEMP_INPUT_PATH)
-        print(f"✅ 成功下載來源檔案至 {LOCAL_TEMP_INPUT_PATH}")
-    except Exception as e:
-        print(f"❌ 錯誤: 從 GCS 下載 {SOURCE_FILE_GCS} 失敗: {e}", file=sys.stderr)
+    # 下載來源檔案
+    if not download_from_gcs(bucket, SOURCE_FILE_GCS, LOCAL_TEMP_INPUT_PATH):
         sys.exit(1)
 
     processed_data = {}
+    
     try:
-        # 嘗試載入已處理的進度，以支援中斷後繼續
+        # 載入已處理的進度（如果存在）
         output_blob = bucket.blob(OUTPUT_FILE_GCS)
         if output_blob.exists():
             print(f"發現現有的結果檔案 {OUTPUT_FILE_GCS}，載入進度...")
             try:
                 existing_data = json.loads(output_blob.download_as_string())
                 if isinstance(existing_data, list):
-                    processed_data = {item['caseNumber']: item for item in existing_data if 'caseNumber' in item}
+                    processed_data = {
+                        item['caseNumber']: item 
+                        for item in existing_data 
+                        if 'caseNumber' in item
+                    }
                     print(f"   -> 已成功載入 {len(processed_data)} 筆已處理的案件進度。")
-                else:
-                    print("   -> 警告: 進度檔案格式不符，將重新開始。")
             except Exception as e:
                 print(f"   -> 警告: 無法讀取或解析進度檔案，將重新開始。錯誤: {e}", file=sys.stderr)
         
+        # 載入待處理資料
         with open(LOCAL_TEMP_INPUT_PATH, 'r', encoding='utf-8') as f:
             auction_data = json.load(f)
         
@@ -328,57 +355,70 @@ def main():
         for i, case_data in enumerate(all_cases):
             case_num_str = case_data.get('caseNumber', f'UNKNOWN_{i}')
             
-            # 如果需要，可以取消註解此區塊以跳過已處理的案件
-            # if case_num_str in processed_data:
-            #     print(f"正在處理: {i+1}/{total} - 案號: {case_num_str} (已處理，跳過)")
-            #     continue
-
+            # 跳過已處理的案件
+            if case_num_str in processed_data:
+                print(f"跳過已處理: {i+1}/{total} - 案號: {case_num_str}")
+                continue
+            
             print(f"正在處理: {i+1}/{total} - 案號: {case_num_str}")
             
             auction_details = None
             pdfs_list = case_data.get('assets', {}).get('pdfs')
-            pdf_url = pdfs_list[0]['url'] if pdfs_list and isinstance(pdfs_list, list) and len(pdfs_list) > 0 and isinstance(pdfs_list[0], dict) else None
+            pdf_url = (
+                pdfs_list[0]['url'] 
+                if pdfs_list and isinstance(pdfs_list, list) 
+                and len(pdfs_list) > 0 and isinstance(pdfs_list[0], dict) 
+                else None
+            )
 
             if pdf_url and pdf_url != 'N/A':
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-                for attempt in range(3): # 重試機制
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                
+                for attempt in range(3):
                     try:
                         response = requests.get(pdf_url, timeout=45, headers=headers)
                         response.raise_for_status()
                         
+                        # 儲存 PDF 到暫存檔案
                         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
                             temp_pdf.write(response.content)
                             temp_pdf_path = temp_pdf.name
                         
                         try:
-                            # *** 使用全新的混合式解析管線 ***
-                            auction_details = parse_auction_pdf_hybrid(temp_pdf_path, case_num_str)
+                            # 解析 PDF
+                            auction_details = parse_auction_pdf_minimal(temp_pdf_path, case_num_str)
                         finally:
-                            os.remove(temp_pdf_path)
+                            # 清理暫存檔案
+                            if os.path.exists(temp_pdf_path):
+                                os.remove(temp_pdf_path)
                         
-                        if not auction_details or not auction_details.get("bidSections"):
-                                print(f"   -> 警告: 案號 {case_num_str} 的 PDF 內容無法成功解析。")
-                                auction_details = { "error": "（PDF 內容解析失敗，請參閱原始文件）" }
-                        break # 成功後跳出重試循環
+                        break
+                        
                     except requests.exceptions.RequestException as e:
-                        if attempt < 2: time.sleep(random.uniform(2, 4))
+                        if attempt < 2:
+                            time.sleep(random.uniform(2, 4))
                         else:
                             print(f"   -> 錯誤: 下載 PDF 失敗 ({case_num_str}): {e}", file=sys.stderr)
-                            auction_details = { "error": f"（PDF 下載失敗: {e}）" }
+                            auction_details = {"error": f"（PDF 下載失敗: {e}）"}
                     except Exception as e:
                         print(f"   -> 錯誤: 處理 PDF 時發生未知錯誤 ({case_num_str}): {e}", file=sys.stderr)
                         traceback.print_exc(file=sys.stderr)
-                        auction_details = { "error": f"（處理 PDF 時發生未知錯誤: {e}）" }
+                        auction_details = {"error": f"（處理 PDF 時發生未知錯誤: {e}）"}
                         break
-                time.sleep(random.uniform(0.5, 1.5)) # 避免請求過於頻繁
+                
+                # 加入延遲以避免過度請求
+                time.sleep(random.uniform(0.5, 1.5))
             else:
-                auction_details = { "error": "（無可用的 PDF 連結）" }
+                auction_details = {"error": "（無可用的 PDF 連結）"}
 
+            # 儲存處理結果
             case_data['auctionDetails'] = auction_details
             processed_data[case_num_str] = case_data
             newly_processed_count += 1
 
-            # 每處理 25 筆新案件就儲存一次進度
+            # 定期儲存進度
             if newly_processed_count > 0 and newly_processed_count % 25 == 0:
                 print(f"\n已處理 {newly_processed_count} 筆新案件，正在儲存進度至 GCS...")
                 output_list = list(processed_data.values())
@@ -387,11 +427,13 @@ def main():
                 else:
                     print("❌ 進度儲存失敗。")
 
+        # 最終儲存
         print("\n所有案件處理完畢，正在進行最終儲存...")
         output_list = list(processed_data.values())
         if upload_to_gcs(bucket, OUTPUT_FILE_GCS, output_list):
-            print(f"\n處理完成！已將 {len(output_list)} 筆案件的詳細資訊儲存至 GCS 上的 {OUTPUT_FILE_GCS}")
+            print(f"\n✅ 處理完成！已將 {len(output_list)} 筆案件的詳細資訊儲存至 GCS 上的 {OUTPUT_FILE_GCS}")
         else:
+            # 本地備份
             local_backup_path = './auctionDataWithDetails_local_backup.json'
             with open(local_backup_path, 'w', encoding='utf-8') as f:
                 json.dump(output_list, f, ensure_ascii=False, indent=4)
@@ -404,7 +446,4 @@ def main():
             print(f"已清理本地暫存檔案: {LOCAL_TEMP_INPUT_PATH}")
 
 if __name__ == '__main__':
-    # 執行前請確保已安裝必要的套件：
-    # pip install requests pdfplumber "camelot-py[cv]" pandas google-cloud-storage PyMuPDF
-    # 同時，請確保已設定好 GCS 的認證環境。
     main()
